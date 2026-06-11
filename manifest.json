@@ -4,7 +4,7 @@
   "description": "优化 GitHub 首页（主页）布局，更充分利用宽屏空间。",
   "version": "0.1.0",
   "permissions": ["storage"],
-  "host_permissions": ["https://github.com/*"],
+  "host_permissions": ["https://github.com/*", "http://localhost:3000/*"],
   "action": {
     "default_title": "GitHub Screen Optimization",
     "default_popup": "popup.html"
