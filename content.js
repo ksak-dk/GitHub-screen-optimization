@@ -230,145 +230,34 @@ function daysSince(isoString) {
   return Math.max(0, Math.floor(diff / (1000 * 60 * 60 * 24)));
 }
 
-async function fetchCommitActivity(nwo) {
-  const cacheKey = `commitActivity:${nwo}`;
-  if (GHSO_INTERNAL.repoCache.has(cacheKey)) return GHSO_INTERNAL.repoCache.get(cacheKey);
-
-  try {
-    const res = await fetch(`https://github.com/${nwo}/graphs/commit-activity-data`, {
-      credentials: 'same-origin'
-    });
-    if (res.status === 202) {
-      // GitHub may still be computing the data.
-      GHSO_INTERNAL.repoCache.set(cacheKey, null);
-      return null;
-    }
-    if (!res.ok) {
-      GHSO_INTERNAL.repoCache.set(cacheKey, null);
-      return null;
-    }
-    const data = await res.json();
-    if (!Array.isArray(data)) {
-      GHSO_INTERNAL.repoCache.set(cacheKey, null);
-      return null;
-    }
-    GHSO_INTERNAL.repoCache.set(cacheKey, data);
-    return data;
-  } catch {
-    GHSO_INTERNAL.repoCache.set(cacheKey, null);
-    return null;
-  }
-}
-
-async function fetchGitHubApiJson(url) {
-  const cacheKey = `api:${url}`;
-  const cached = GHSO_INTERNAL.repoCache.get(cacheKey);
-  if (cached && typeof cached === 'object' && cached.ts && Date.now() - cached.ts < 10 * 60 * 1000) {
-    return cached.value;
+async function fetchBffDashboardData(nwo) {
+  const cacheKey = `bffDashboard:${nwo}`;
+  if (GHSO_INTERNAL.repoCache.has(cacheKey)) {
+    return GHSO_INTERNAL.repoCache.get(cacheKey);
   }
 
+  const [owner, repo] = nwo.split('/');
+  if (!owner || !repo) return null;
+
   try {
-    const res = await fetch(url, {
+    const res = await fetch(`http://localhost:3000/api/v1/repos/${owner}/${repo}/dashboard`, {
       credentials: 'omit',
       headers: {
-        Accept: 'application/vnd.github+json'
+        Accept: 'application/json'
       }
     });
     if (!res.ok) {
-      GHSO_INTERNAL.repoCache.set(cacheKey, { ts: Date.now(), value: null });
+      GHSO_INTERNAL.repoCache.set(cacheKey, null);
       return null;
     }
     const data = await res.json();
-    GHSO_INTERNAL.repoCache.set(cacheKey, { ts: Date.now(), value: data });
+    GHSO_INTERNAL.repoCache.set(cacheKey, data);
     return data;
-  } catch {
-    GHSO_INTERNAL.repoCache.set(cacheKey, { ts: Date.now(), value: null });
+  } catch (err) {
+    console.error('Error fetching GitDash BFF data:', err);
+    GHSO_INTERNAL.repoCache.set(cacheKey, null);
     return null;
   }
-}
-
-async function fetchRepoInfo(nwo) {
-  const cacheKey = `repoInfo:${nwo}`;
-  if (GHSO_INTERNAL.repoCache.has(cacheKey)) return GHSO_INTERNAL.repoCache.get(cacheKey);
-  const data = await fetchGitHubApiJson(`https://api.github.com/repos/${nwo}`);
-  const info =
-    data && typeof data === 'object'
-      ? {
-          stars: data.stargazers_count ?? null,
-          forks: data.forks_count ?? null,
-          archived: !!data.archived
-        }
-      : { stars: null, forks: null, archived: null };
-  GHSO_INTERNAL.repoCache.set(cacheKey, info);
-  return info;
-}
-
-async function fetchIssueCounts(nwo) {
-  const cacheKey = `issueCounts:${nwo}`;
-  const cached = GHSO_INTERNAL.repoCache.get(cacheKey);
-  if (cached && typeof cached === 'object' && cached.ts && Date.now() - cached.ts < 10 * 60 * 1000) {
-    return cached.value;
-  }
-
-  const qBase = `repo:${nwo} type:issue`;
-  const openUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(`${qBase} state:open`)}`;
-  const closedUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(`${qBase} state:closed`)}`;
-
-  const [openData, closedData] = await Promise.all([fetchGitHubApiJson(openUrl), fetchGitHubApiJson(closedUrl)]);
-  const open = typeof openData?.total_count === 'number' ? openData.total_count : null;
-  const closed = typeof closedData?.total_count === 'number' ? closedData.total_count : null;
-  const value = { open, closed };
-  GHSO_INTERNAL.repoCache.set(cacheKey, { ts: Date.now(), value });
-  return value;
-}
-
-async function getLanguages(nwo) {
-  const cacheKey = `languages:${nwo}`;
-  if (GHSO_INTERNAL.repoCache.has(cacheKey)) return GHSO_INTERNAL.repoCache.get(cacheKey);
-
-  // DOM fast-path: GitHub shows languages as links to /search?l=... with an SVG dot.
-  // Example:
-  // <a ... href="/.../search?l=typescript"><svg style="color:#3178c6;" ...></svg> ... <span>83.6%</span></a>
-  const anchors = Array.from(
-    document.querySelectorAll(
-      'a[href*="/search?l="][data-ga-click*="language stats"], a[href*="/search?l="][data-ga-click*="language stats search click"], a[href*="/search?l="]'
-    )
-  );
-
-  const candidates = [];
-  for (const a of anchors) {
-    const href = a.getAttribute('href') || '';
-    if (!href.includes(`/${nwo}/search?l=`) && !href.startsWith(`/${nwo}/search?l=`)) {
-      // Keep it repo-scoped; avoids picking random search links.
-      continue;
-    }
-
-    const nameEl = a.querySelector('span.text-bold, span.color-fg-default.text-bold, span.color-fg-default');
-    const name = (nameEl?.textContent || a.textContent || '').trim().split(/\s+/)[0];
-    const percentMatch = (a.textContent || '').match(/(\d+(?:\.\d+)?)%/);
-    const percent = percentMatch ? Number(percentMatch[1]) : NaN;
-    if (!name || !Number.isFinite(percent)) continue;
-
-    const svg = a.querySelector('svg.octicon-dot-fill') || a.querySelector('svg');
-    const style = svg?.getAttribute('style') || '';
-    const color = svg?.style?.color || style.match(/color\s*:\s*([^;]+)/i)?.[1]?.trim() || '';
-    candidates.push({ name, percent, color });
-  }
-
-  if (candidates.length > 0) {
-    // De-dup by language name and keep the highest percent.
-    const map = new Map();
-    for (const c of candidates) {
-      const prev = map.get(c.name);
-      if (!prev || c.percent > prev.percent) map.set(c.name, c);
-    }
-    const langs = Array.from(map.values()).sort((a, b) => b.percent - a.percent);
-    GHSO_INTERNAL.repoCache.set(cacheKey, langs);
-    return langs;
-  }
-
-  GHSO_INTERNAL.repoCache.set(cacheKey, []);
-  return [];
 }
 
 function findRepoCounter(kind, nwo) {
@@ -382,7 +271,7 @@ function findRepoCounter(kind, nwo) {
       document.querySelector(`a[href*="/${nwo}/stargazers"] .Counter`) ||
       document.querySelector(`a[href*="/${nwo}/stargazers"]`);
     const txt = (el?.textContent || '').trim();
-    return txt || null;
+    return txt.replace(/stars?/i, '').trim() || null;
   }
 
   if (kind === 'issues') {
@@ -392,24 +281,10 @@ function findRepoCounter(kind, nwo) {
       document.querySelector(`a[href*="/${nwo}/issues"] .Counter`) ||
       document.querySelector(`a[href*="/${nwo}/issues"]`);
     const txt = (el?.textContent || '').trim();
-    return txt || null;
+    return txt.replace(/issues?/i, '').trim() || null;
   }
 
   return null;
-}
-
-function computeCommitStats(weeks) {
-  if (!Array.isArray(weeks) || weeks.length === 0) return null;
-  const totals = weeks.map((w) => Number(w?.total || 0));
-  const last12 = totals.slice(-12);
-  const last4 = totals.slice(-4);
-  const avg4 = last4.reduce((a, b) => a + b, 0) / Math.max(1, last4.length);
-  return {
-    totals,
-    last12,
-    avg4: Number.isFinite(avg4) ? avg4 : null,
-    max12: Math.max(1, ...last12)
-  };
 }
 
 async function ensureRepoSummaryCard(lang) {
@@ -565,13 +440,16 @@ async function ensureRepoSummaryCard(lang) {
   readmeBtn?.addEventListener('click', onReadme);
   addCleanup(() => readmeBtn?.removeEventListener('click', onReadme));
 
-  // Populate metrics.
-  const repoInfo = await fetchRepoInfo(nwo);
+  // Populate metrics from BFF.
+  const dashboardData = await fetchBffDashboardData(nwo);
+  const repoInfo = dashboardData?.repository;
+  const metrics = dashboardData?.metrics;
+  const visualizations = dashboardData?.visualizations;
+
   const starsText = findRepoCounter('stars', nwo);
-  const issuesText = findRepoCounter('issues', nwo);
   card.querySelector('[data-ghso-stars]').textContent =
-    (starsText && starsText.replace(/\s+/g, '')) || (repoInfo?.stars !== null ? formatCompact(repoInfo.stars) : '—');
-  card.querySelector('[data-ghso-forks]').textContent = repoInfo?.forks !== null ? formatCompact(repoInfo.forks) : '—';
+    (starsText && starsText.replace(/\s+/g, '')) || (repoInfo?.stars !== null && repoInfo?.stars !== undefined ? formatCompact(repoInfo.stars) : '—');
+  card.querySelector('[data-ghso-forks]').textContent = repoInfo?.forks !== null && repoInfo?.forks !== undefined ? formatCompact(repoInfo.forks) : '—';
 
   const lastPushIso =
     document
@@ -582,7 +460,7 @@ async function ensureRepoSummaryCard(lang) {
 
   const statusEl = card.querySelector('[data-ghso-status]');
   const pushEl = card.querySelector('[data-ghso-lastpush]');
-  const archived = repoInfo?.archived === true;
+  const archived = repoInfo?.isArchived === true;
 
   let statusText = '—';
   let statusTone = 'neutral';
@@ -610,10 +488,8 @@ async function ensureRepoSummaryCard(lang) {
     lastPushDays === null ? t(L, 'lastPushUnknown') : t(L, 'lastPushDays', { days: lastPushDays });
 
   // Issues open/closed ratio.
-  const openFromDom = issuesText ? parseAbbrevNumber(issuesText) : null;
-  const issueCounts = await fetchIssueCounts(nwo);
-  const openIssues = openFromDom ?? issueCounts?.open ?? null;
-  const closedIssues = issueCounts?.closed ?? null;
+  const openIssues = metrics?.issues?.open ?? null;
+  const closedIssues = metrics?.issues?.closed ?? null;
 
   card.querySelector('[data-ghso-issues-open]').textContent = openIssues === null ? '—' : formatCompact(openIssues);
   card.querySelector('[data-ghso-issues-closed]').textContent = closedIssues === null ? '—' : formatCompact(closedIssues);
@@ -632,7 +508,13 @@ async function ensureRepoSummaryCard(lang) {
   }
 
   // Languages chart.
-  const langs = await getLanguages(nwo);
+  const rawLangs = visualizations?.languages || [];
+  const langs = rawLangs.map(l => ({
+    name: l.name,
+    percent: typeof l.value === 'number' ? Math.round(l.value * 10) / 10 : 0,
+    color: l.color
+  }));
+
   const langBar = card.querySelector('[data-ghso-langbar]');
   const langLegend = card.querySelector('[data-ghso-langlegend]');
   const langNote = card.querySelector('[data-ghso-lang-note]');
@@ -668,20 +550,27 @@ async function ensureRepoSummaryCard(lang) {
   // Activity chart.
   const activityEl = card.querySelector('[data-ghso-activity]');
   const activityNote = card.querySelector('[data-ghso-activity-note]');
-  const weeks = await fetchCommitActivity(nwo);
-  const stats = computeCommitStats(weeks);
-  if (!stats) {
+
+  const commitTrend = visualizations?.commitTrend;
+  const trendData = Array.isArray(commitTrend?.data) ? commitTrend.data.map(Number) : [];
+  const trendLabels = Array.isArray(commitTrend?.labels) ? commitTrend.labels : [];
+
+  if (trendData.length === 0) {
     activityEl.textContent = '—';
   } else {
-    const avg4 = stats.avg4 === null ? null : Math.round(stats.avg4 * 10) / 10;
-    card.querySelector('[data-ghso-avg4]').textContent = avg4 === null ? '—' : String(avg4);
-    activityNote.textContent = t(L, 'maxPerWeek', { max: Math.max(...stats.last12) });
+    // Calculate 4w avg (or total if less than 4 data points)
+    const last4 = trendData.slice(-4);
+    const avg4 = last4.length > 0 ? last4.reduce((a, b) => a + b, 0) / last4.length : 0;
+    card.querySelector('[data-ghso-avg4]').textContent = String(Math.round(avg4 * 10) / 10);
+
+    const maxVal = Math.max(1, ...trendData);
+    activityNote.textContent = t(L, 'maxPerWeek', { max: maxVal });
 
     const svgNS = 'http://www.w3.org/2000/svg';
     const w = 240;
     const h = 36;
     const gap = 2;
-    const barW = Math.floor((w - gap * (stats.last12.length - 1)) / stats.last12.length);
+    const barW = Math.floor((w - gap * (trendData.length - 1)) / trendData.length);
 
     const svg = document.createElementNS(svgNS, 'svg');
     svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
@@ -690,9 +579,9 @@ async function ensureRepoSummaryCard(lang) {
     svg.setAttribute('preserveAspectRatio', 'none');
     svg.classList.add('ghso-activity-svg');
 
-    for (let i = 0; i < stats.last12.length; i++) {
-      const v = stats.last12[i];
-      const bh = Math.max(1, Math.round((v / stats.max12) * (h - 2)));
+    for (let i = 0; i < trendData.length; i++) {
+      const v = trendData[i];
+      const bh = Math.max(1, Math.round((v / maxVal) * (h - 2)));
       const x = i * (barW + gap);
       const y = h - bh;
       const rect = document.createElementNS(svgNS, 'rect');
@@ -703,7 +592,10 @@ async function ensureRepoSummaryCard(lang) {
       rect.setAttribute('rx', '1');
       rect.setAttribute('fill', 'var(--fgColor-accent, var(--color-accent-fg))');
       rect.setAttribute('opacity', v === 0 ? '0.25' : '0.85');
-      rect.appendChild(document.createElementNS(svgNS, 'title')).textContent = t(L, 'commitsN', { n: v });
+
+      const labelDate = trendLabels[i] || '';
+      rect.appendChild(document.createElementNS(svgNS, 'title')).textContent =
+        labelDate ? `${labelDate}: ${t(L, 'commitsN', { n: v })}` : t(L, 'commitsN', { n: v });
       svg.appendChild(rect);
     }
 
